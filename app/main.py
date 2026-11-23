@@ -1,6 +1,8 @@
-"""FastAPI 离线显存规划接口。"""
+"""FastAPI 离线显存规划 + 运行时共享显存池演练接口。"""
 
 from __future__ import annotations
+
+import os
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -8,15 +10,40 @@ from pydantic import BaseModel, Field
 
 from .planner.models import PlanningError, PlanningInput, TensorSpec, Wait
 from .planner.service import plan
+from .runtime.router import router as runtime_router
+from .runtime.service import RuntimeService
+
+# 共享显存池容量（字节），可通过环境变量 POOL_SIZE_BYTES 配置
+DEFAULT_POOL_SIZE = 16 * 1024 * 1024
+
+
+def _load_pool_size() -> int:
+    raw = os.environ.get("POOL_SIZE_BYTES")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_POOL_SIZE
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"POOL_SIZE_BYTES={raw!r} 不是正整数"
+        ) from exc
+    if value <= 0:
+        raise RuntimeError("POOL_SIZE_BYTES 必须为正整数")
+    return value
 
 app = FastAPI(
-    title="CUDA 双流显存离线规划接口",
-    version="1.0.0",
+    title="CUDA 双流显存规划与单进程共享显存池演练接口",
+    version="1.1.0",
     description=(
         "给定两条 CUDA 流的算子顺序、跨流等待与张量生命周期，"
         "在显存预算内规划各张量的字节偏移；必要时新增一条不成环的跨流等待。"
+        "/runtime 路由按规划结果在单进程共享显存池中受理推理工作区，"
+        "登记算子提交/完成并支持取消，模拟取消后在途算子仍占用显存的行为。"
     ),
 )
+
+app.state.runtime_service = RuntimeService(_load_pool_size())
+app.include_router(runtime_router)
 
 
 class WaitIn(BaseModel):

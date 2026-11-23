@@ -3,6 +3,9 @@ services:
     build: .
     image: cuda-mem-planner:latest
     container_name: cuda-mem-planner
+    environment:
+      # 单进程共享显存池容量（字节），默认 16 MiB，可按需覆盖
+      POOL_SIZE_BYTES: ${POOL_SIZE_BYTES:-16777216}
     ports:
       - "8000:8000"
     restart: unless-stopped

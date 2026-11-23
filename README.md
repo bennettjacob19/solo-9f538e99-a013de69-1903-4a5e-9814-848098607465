@@ -1,10 +1,14 @@
-# CUDA 双流显存离线规划服务
+# CUDA 双流显存规划服务
 
 在边缘推理部署前，对两条 CUDA 流的算子/张量做**离线显存复用规划**。
 给定两条流的算子顺序、已有的跨流等待（依赖）、每个张量的生产算子与全部消费算子、
 字节数、偏移对齐要求与显存预算，接口返回每个张量在同一块显存中的字节偏移；
 当原依赖下任何合法时序都无法满足预算时，允许新增**一条不成环**的跨流等待后再规划，
 仍然排不下则报告无解。
+
+此外，`/runtime` 路由提供**单进程共享显存池演练**：按配置模拟一块连续显存，
+受理推理工作区申请、登记算子提交/完成并支持取消，模拟“取消后已提交给 CUDA
+的算子仍在读写显存”的回收语义。详见 [`docs/walkthrough.md`](docs/walkthrough.md)。
 
 ## 规划语义（核心规则）
 
@@ -28,6 +32,14 @@ app/
     models.py      输入校验后的内部数据结构
     solver.py      依赖图、干扰图与最优显存布局（标准库实现）
     service.py     规划编排：原依赖优先，必要时加一条等待
+  runtime/
+    pool.py        单进程共享显存池：段式预留 + 在途算子引用计数
+    service.py     推理工作区生命周期（申请/提交/完成/取消）
+    schemas.py     /runtime 请求与响应模型
+    router.py      /runtime HTTP 路由
+docs/
+  walkthrough.md   共享显存池单进程演练说明（语义、接口、并发）
+  walkthrough.py   可直接运行的演练脚本（逐段打印池布局）
 tests/             pytest 自测（含属性化随机校验）
 Dockerfile
 docker-compose.yml
@@ -38,7 +50,8 @@ requirements.txt
 
 ```bash
 docker compose up --build
-# 打开 http://localhost:8000/docs 提交规划请求
+# 打开 http://localhost:8000/docs 提交规划/运行时请求
+# 显存池容量可用环境变量配置：POOL_SIZE_BYTES=4096 docker compose up
 ```
 
 不用 Docker 时：
@@ -68,3 +81,22 @@ python3 -m venv --without-pip .venv && .venv/bin/python <(curl -sS https://boots
 - `note`: 说明信息
 - 无解时 `feasible=false`，`offsets` 为空，并通过 `best_effort_total_bytes`
   给出（加至多一条等待后）能达到的最小占用，便于调用方判断预算缺口。
+
+## 运行时共享显存池（/runtime）
+
+按 `/plan` 的请求格式向 `POST /runtime/workspaces` 申请工作区：布局可行时
+按 `total_bytes` 在共享显存池中分配满足全部张量对齐的连续空间，返回推理号、
+规划与基址；池内没有合适空段或规划无解时申请失败（HTTP 409）且原占用不变。
+
+凭推理号通过 `.../ops/submit`、`.../ops/complete` 登记算子提交与完成，
+通过 `.../cancel` 取消整笔推理：
+
+- 正常推理在全部算子完成后整体归还工作区；
+- 取消后拒绝新提交，只保留已提交未完成算子仍在读写的字节区间，
+  其余空间立即开放给新推理；
+- 多个在途算子共用的字节按引用计数保留，最后一个算子完成才释放；
+- 迟到/重复的提交与完成记录一律拒绝，不能释放其他推理的占用；
+- 规划计算在锁外进行，期间完成/取消仍可登记，分配以当时的池占用为准。
+
+完整接口示例与逐语义演练见 [`docs/walkthrough.md`](docs/walkthrough.md)，
+也可直接运行 `python docs/walkthrough.py` 观看池布局变化。
